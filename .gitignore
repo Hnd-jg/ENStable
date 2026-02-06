@@ -3,6 +3,7 @@ out/
 cache/
 broadcast/
 test-results/
+coverage.txt
 
 # --- Soldeer  ---
 dependencies/
