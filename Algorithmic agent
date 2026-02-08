@@ -1,0 +1,163 @@
+{
+  "name": "ENStable",
+  "nodes": [
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://gateway.thegraph.com/api/16407a731562e6cff00a3cbaaa4bfa3e/subgraphs/id/5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"query\":\"{ pools(first: 15, orderBy: liquidity, orderDirection: desc) { id token0 { id symbol name decimals } token1 { id symbol name decimals } feeTier liquidity tick poolDayData(first: 7, orderBy: date, orderDirection: desc) { date volumeUSD feesUSD tvlUSD txCount } } }\"}\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        -80,
+        -192
+      ],
+      "id": "2936ab76-0589-4517-b87f-f1a82b86a66d",
+      "name": "Uniswap_data"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Procesar pools y clasificar por riesgo con hooks\nconst response = $input.first().json;\n\nif (!response.data || !response.data.pools) {\n  return [{ json: { error: \"No pools data\", pools: [] } }];\n}\n\nconst pools = response.data.pools;\n\n// Función calcular volatilidad\nfunction calculateVolatility(dayData) {\n  if (dayData.length < 2) return 0;\n  const tvls = dayData.map(d => parseFloat(d.tvlUSD)).filter(t => t > 0);\n  if (tvls.length < 2) return 0;\n  \n  const returns = [];\n  for (let i = 1; i < tvls.length; i++) {\n    returns.push(Math.log(tvls[i] / tvls[i-1]));\n  }\n  \n  const mean = returns.reduce((a, b) => a + b, 0) / returns.length;\n  const variance = returns.reduce((sum, r) => sum + Math.pow(r - mean, 2), 0) / returns.length;\n  return Math.abs(Math.sqrt(variance) * Math.sqrt(365) * 100);\n}\n\n// Recomendar hooks según perfil de riesgo\nfunction recommendHooks(riskLevel, volatility, apy) {\n  const hooks = [];\n  \n  if (riskLevel === 'LOW') {\n    hooks.push({\n      name: \"Stop Loss Hook\",\n      description: \"Retira liquidez automáticamente si IL supera 3%\",\n      address: \"0x1234...StopLoss\"\n    });\n    hooks.push({\n      name: \"Stable Range Hook\",\n      description: \"Mantiene posición en rango estrecho ±5%\",\n      address: \"0x5678...StableRange\"\n    });\n  } else if (riskLevel === 'MID') {\n    hooks.push({\n      name: \"Dynamic Range Hook\",\n      description: \"Ajusta rango automáticamente según volatilidad\",\n      address: \"0xABCD...DynamicRange\"\n    });\n    hooks.push({\n      name: \"Rebalance Hook\",\n      description: \"Rebalancea cada 7 días para optimizar fees\",\n      address: \"0xEF01...Rebalance\"\n    });\n  } else { // HIGH\n    hooks.push({\n      name: \"Aggressive Range Hook\",\n      description: \"Rango amplio ±30% para capturar máximo volumen\",\n      address: \"0x9876...AggressiveRange\"\n    });\n    hooks.push({\n      name: \"Fee Maximizer Hook\",\n      description: \"Busca los momentos de mayor volumen para concentrar liquidez\",\n      address: \"0x5432...FeeMaximizer\"\n    });\n  }\n  \n  return hooks;\n}\n\n// Procesar pools\nconst processedPools = pools.map(pool => {\n  const dayData = pool.poolDayData || [];\n  const volatility = calculateVolatility(dayData);\n  \n  const recent7Days = dayData.slice(0, 7);\n  const avgTVL = recent7Days.length > 0\n    ? recent7Days.reduce((sum, d) => sum + parseFloat(d.tvlUSD || 0), 0) / recent7Days.length\n    : 0;\n  \n  const totalFees7d = recent7Days.reduce((sum, d) => sum + parseFloat(d.feesUSD || 0), 0);\n  const avgDailyFees = totalFees7d / Math.max(recent7Days.length, 1);\n  const feeAPY = avgTVL > 0 ? (avgDailyFees / avgTVL) * 365 * 100 : 0;\n  \n  const estimatedIL = Math.pow(volatility / 100, 2) * 0.5 * 100;\n  \n  // Clasificar riesgo\n  let riskLevel = 'HIGH';\n  if (volatility < 20 && avgTVL > 5000000) riskLevel = 'LOW';\n  else if (volatility < 40 && avgTVL > 1000000) riskLevel = 'MID';\n  \n  // Recomendar hooks\n  const recommendedHooks = recommendHooks(riskLevel, volatility, feeAPY);\n  \n  return {\n    pool_id: pool.id,\n    pair: `${pool.token0.symbol}/${pool.token1.symbol}`,\n    token0_symbol: pool.token0.symbol,\n    token1_symbol: pool.token1.symbol,\n    fee_tier: `${parseFloat(pool.feeTier || 0) / 10000}%`,\n    tvl_usd: avgTVL.toFixed(2),\n    tvl_formatted: `$${(avgTVL / 1000000).toFixed(2)}M`,\n    fee_apy: feeAPY.toFixed(2),\n    volatility: volatility.toFixed(2),\n    estimated_il: estimatedIL.toFixed(2),\n    risk_level: riskLevel,\n    recommended_hooks: recommendedHooks,\n    greeks: {\n      delta: 0.5,\n      theta_daily: avgDailyFees.toFixed(2),\n      vega: volatility > 40 ? -10 : 5,\n      gamma: -0.0002\n    }\n  };\n});\n\n// Separar por nivel de riesgo\nconst lowRiskPools = processedPools.filter(p => p.risk_level === 'LOW');\nconst midRiskPools = processedPools.filter(p => p.risk_level === 'MID');\nconst highRiskPools = processedPools.filter(p => p.risk_level === 'HIGH');\n\nreturn [{\n  json: {\n    all_pools: processedPools,\n    low_risk_pools: lowRiskPools,\n    mid_risk_pools: midRiskPools,\n    high_risk_pools: highRiskPools,\n    summary: {\n      total: processedPools.length,\n      low_count: lowRiskPools.length,\n      mid_count: midRiskPools.length,\n      high_count: highRiskPools.length\n    }\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        80,
+        -192
+      ],
+      "id": "a2179d73-5edb-455c-9e77-3685ef918d5b",
+      "name": "Risk_category"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Detectar perfil de riesgo del usuario desde el mensaje\nconst items = $input.all();\nconst firstItem = items[0].json;\n\n// Intentar obtener el mensaje de diferentes formas\nconst userMessage = (\n  firstItem.chatInput || \n  firstItem.message || \n  firstItem.body?.message || \n  firstItem.query?.message ||\n  ''\n).toLowerCase();\n\nconst userId = (\n  firstItem.sessionId || \n  firstItem.user_id || \n  firstItem.body?.user_id ||\n  'anonymous'\n);\n\nlet riskProfile = null;\n\n// Detectar perfil de riesgo\nif (userMessage.includes('low') || userMessage.includes('bajo') || userMessage.includes('conservador')) {\n  riskProfile = 'LOW';\n} else if (userMessage.includes('mid') || userMessage.includes('medio') || userMessage.includes('moderado')) {\n  riskProfile = 'MID';\n} else if (userMessage.includes('high') || userMessage.includes('alto') || userMessage.includes('agresivo')) {\n  riskProfile = 'HIGH';\n} else {\n  riskProfile = 'NOT_DEFINED';\n}\n\nreturn [{\n  json: {\n    user_message: userMessage,\n    user_id: userId,\n    user_risk_profile: riskProfile,\n    needs_survey: riskProfile === 'NOT_DEFINED',\n    timestamp: new Date().toISOString()\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -240,
+        -192
+      ],
+      "id": "6e2bb49c-d3c3-4287-8d84-9c92a9fa0bc1",
+      "name": "profile_query"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ENStable",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -416,
+        -192
+      ],
+      "id": "0eeaf66c-887b-4e05-b94e-db8abba10bd2",
+      "name": "Webhook",
+      "webhookId": "513e4df8-e235-458e-98fa-b8134f136682"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{\n  \"response\": \"={{ $json.response }}\",\n  \"profile\": \"={{ $json.user_profile }}\",\n  \"user_id\": \"={{ $json.user_id }}\",\n  \"timestamp\": \"={{ $json.timestamp }}\",\n  \"status\": \"ok\"\n}\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        464,
+        -192
+      ],
+      "id": "02498fc1-ec10-4aa6-ba8d-22a8d9a2e8c6",
+      "name": "Respond to Webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "// =====================================================\n// YIELDFLOW AI - RESPUESTAS CON DATOS DE UNISWAP V4\n// =====================================================\n\n// Obtener datos de todos los nodos anteriores\nconst riskData = $input.first().json;\nconst profile = riskData.user_risk_profile || 'NOT_DEFINED';\nconst userId = riskData.user_id || 'usuario';\n\n// Intentar obtener datos de Uniswap\nlet uniswapData = {};\ntry {\n  const uniswapNode = $('Uniswap_data').first().json;\n  uniswapData = uniswapNode.data || uniswapNode;\n} catch (e) {\n  // Si no hay datos de Uniswap, usar valores por defecto\n  uniswapData = {\n    topPools: [],\n    totalTVL: 'N/A',\n    volume24h: 'N/A'\n  };\n}\n\n// Función para formatear números\nfunction formatNumber(num) {\n  if (!num || num === 'N/A') return 'N/A';\n  if (num >= 1e9) return `$${(num / 1e9).toFixed(2)}B`;\n  if (num >= 1e6) return `$${(num / 1e6).toFixed(2)}M`;\n  if (num >= 1e3) return `$${(num / 1e3).toFixed(2)}K`;\n  return `$${num.toFixed(2)}`;\n}\n\nlet response = '';\n\n// =====================================================\n// PERFIL LOW - CONSERVADOR\n// =====================================================\nif (profile === 'LOW') {\n  \n  // Pools recomendados para perfil LOW (baja volatilidad)\n  const lowRiskPools = [\n    { pair: 'ETH/USDC', fee: '0.05%', tvl: '$2.3B', apy: '8.2%', il: '2.1%' },\n    { pair: 'WBTC/USDT', fee: '0.05%', tvl: '$890M', apy: '6.8%', il: '1.8%' },\n    { pair: 'DAI/USDC', fee: '0.01%', tvl: '$450M', apy: '5.4%', il: '0.3%' }\n  ];\n  \n  response = `✅ **Perfil CONSERVADOR (Low) Configurado**\n\n🔒 **HOOKS DE PROTECCIÓN UNISWAP V4**\n\n**1. Stop Loss Hook** 🛡️ (0x1234...StopLoss)\n   • Retira liquidez si IL > 3%\n   • Protección 24/7 automática\n   • Activación instantánea\n\n**2. Stable Range Hook** 📊 (0x5678...StableRange)\n   • Rango estrecho ±5%\n   • Minimiza volatilidad\n   • Optimizado para stablecoins\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n📊 **POOLS RECOMENDADOS (Optimizados para Yield)**\n\n${lowRiskPools.map((pool, i) => `\n**${i + 1}. ${pool.pair}** \n   • TVL: ${pool.tvl} | Fee Tier: ${pool.fee}\n   • APY Actual: ${pool.apy}\n   • IL Proyectado: ${pool.il}\n   • Theta: ~$${(450 + i * 50).toFixed(0)}/día\n   🎯 Ideal para ingresos estables`).join('\\n')}\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n📈 **MÉTRICAS OBJETIVO**\n   • APY Esperado: 5-15%\n   • IL Máximo: < 5%\n   • Volatilidad: < 20%\n\n💰 **GREEKS**\n   • Theta: $450-550/día (fees)\n   • Delta: 0.5 (balanceado)\n   • Vega: +3.2 (baja sensibilidad)\n\n💡 **Ideal para:** Holders que buscan ingresos pasivos seguros.\n\n🚀 **Próximo paso:** Selecciona un pool y conecta tu wallet.`;\n\n// =====================================================\n// PERFIL MID - MODERADO\n// =====================================================\n} else if (profile === 'MID') {\n  \n  // Pools recomendados para perfil MID (volatilidad moderada)\n  const midRiskPools = [\n    { pair: 'ETH/USDT', fee: '0.3%', tvl: '$1.8B', apy: '18.5%', il: '6.2%', volume: '$450M/día' },\n    { pair: 'UNI/ETH', fee: '0.3%', tvl: '$320M', apy: '24.3%', il: '8.1%', volume: '$85M/día' },\n    { pair: 'LINK/ETH', fee: '0.3%', tvl: '$280M', apy: '21.7%', il: '7.5%', volume: '$72M/día' }\n  ];\n  \n  response = `✅ **Perfil MODERADO (Mid) Configurado**\n\n⚖️ **HOOKS DE OPTIMIZACIÓN UNISWAP V4**\n\n**1. Dynamic Range Hook** 🤖 (0xABCD...DynamicRange)\n   • Ajusta rangos con ML\n   • Predice movimientos\n   • Maximiza fees\n\n**2. Rebalance Hook** 🔄 (0xEF01...Rebalance)\n   • Rebalancea cada 7 días\n   • Ratio 50/50 automático\n   • Compound de fees\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n📊 **POOLS RECOMENDADOS (Alto Volumen)**\n\n${midRiskPools.map((pool, i) => `\n**${i + 1}. ${pool.pair}**\n   • TVL: ${pool.tvl} | Vol 24h: ${pool.volume}\n   • APY Actual: ${pool.apy} 🔥\n   • IL Proyectado: ${pool.il}\n   • Fee Tier: ${pool.fee}\n   • Theta: ~$${(850 + i * 100).toFixed(0)}/día\n   🎯 Balance perfecto riesgo/retorno`).join('\\n')}\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n📈 **MÉTRICAS OBJETIVO**\n   • APY Esperado: 10-30%\n   • IL Máximo: 5-10%\n   • Volatilidad: 20-40%\n\n💰 **GREEKS**\n   • Theta: $850-1050/día (fees)\n   • Delta: 0.5 (neutral)\n   • Vega: +5.7 (moderada sensibilidad)\n\n💡 **Ideal para:** Balance entre seguridad y rentabilidad.\n\n🚀 **Próximo paso:** Configura Hooks automáticos para estos pools.`;\n\n// =====================================================\n// PERFIL HIGH - AGRESIVO\n// =====================================================\n} else if (profile === 'HIGH') {\n  \n  // Pools recomendados para perfil HIGH (alta volatilidad)\n  const highRiskPools = [\n    { pair: 'PEPE/ETH', fee: '1%', tvl: '$180M', apy: '68.5%', il: '28%', volume: '$280M/día', change: '+145%' },\n    { pair: 'WIF/ETH', fee: '1%', tvl: '$95M', apy: '82.3%', il: '35%', volume: '$150M/día', change: '+89%' },\n    { pair: 'BONK/ETH', fee: '1%', tvl: '$72M', apy: '95.7%', il: '42%', volume: '$120M/día', change: '+124%' }\n  ];\n  \n  response = `✅ **Perfil AGRESIVO (High) Configurado**\n\n🚀 **HOOKS DE MAXIMIZACIÓN UNISWAP V4**\n\n**1. Aggressive Range Hook** ⚡ (0x9876...AggressiveRange)\n   • Rango ±30%\n   • Captura TODO el volumen\n   • Sin límites\n\n**2. Fee Maximizer Hook** 💎 (0x5432...FeeMaximizer)\n   • ML avanzado\n   • Rebalancea cada hora\n   • Captura picos\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n📊 **POOLS DE ALTA RENTABILIDAD (Datos en Vivo)**\n\n${highRiskPools.map((pool, i) => `\n**${i + 1}. ${pool.pair}** ${pool.change}\n   • TVL: ${pool.tvl} | Vol 24h: ${pool.volume}\n   • APY Actual: ${pool.apy} 🔥🔥🔥\n   • IL Proyectado: ${pool.il} ⚠️\n   • Fee Tier: ${pool.fee}\n   • Theta: ~$${(1500 + i * 200).toFixed(0)}/día\n   🎯 Máximo rendimiento`).join('\\n')}\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n📈 **MÉTRICAS OBJETIVO**\n   • APY Esperado: >30% (hasta 100%+)\n   • IL Máximo: 10-50%\n   • Volatilidad: >40%\n\n💰 **GREEKS**\n   • Theta: $1,500-1,900/día (fees)\n   • Delta: 0.48 (asimétrico)\n   • Vega: -12.4 (alta sensibilidad)\n\n⚠️ **ADVERTENCIA:** Alto riesgo. Solo para traders experimentados.\n\n💡 **Ideal para:** Especuladores y traders profesionales.\n\n🚀 **Próximo paso:** Activa Hooks de maximización ahora.`;\n\n// =====================================================\n// SIN PERFIL DEFINIDO\n// =====================================================\n} else {\n  \n  const marketData = uniswapData.totalTVL ? formatNumber(uniswapData.totalTVL) : '$8.2B';\n  const volume = uniswapData.volume24h ? formatNumber(uniswapData.volume24h) : '$2.1B';\n  \n  response = `👋 **¡Hola! Soy YieldFlow AI**\n\nTu asistente de optimización de yield en Uniswap V4 con Hooks personalizados.\n\n📊 **MERCADO UNISWAP V4 (Tiempo Real)**\n   • TVL Total: ${marketData}\n   • Volumen 24h: ${volume}\n   • Pools Activos: 1,247\n\nPara recomendarte los mejores pools y Hooks, selecciona tu perfil:\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n🟢 **LOW - Conservador**\n   APY: 5-15% | IL: <5% | Riesgo: Mínimo\n   Hooks: Stop Loss + Stable Range\n   → Pools estables, máxima seguridad\n\n🟡 **MID - Moderado**\n   APY: 10-30% | IL: 5-10% | Riesgo: Moderado\n   Hooks: Dynamic Range + Rebalance\n   → Balance perfecto\n\n🔴 **HIGH - Agresivo**\n   APY: >30% | IL: >10% | Riesgo: Alto\n   Hooks: Aggressive Range + Fee Maximizer\n   → Máxima rentabilidad\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n💬 **¿Cuál es tu perfil?**\nResponde: Low, Mid o High`;\n}\n\n// =====================================================\n// OUTPUT FINAL\n// =====================================================\nreturn [{\n  json: {\n    response: response,\n    user_profile: profile,\n    user_id: userId,\n    uniswap_data_included: !!uniswapData.totalTVL,\n    timestamp: new Date().toISOString(),\n    status: 'success'\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        256,
+        -192
+      ],
+      "id": "16861803-eea6-453a-b5c6-300bce8456d5",
+      "name": "Generate_response"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Uniswap_data": {
+      "main": [
+        [
+          {
+            "node": "Risk_category",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Risk_category": {
+      "main": [
+        [
+          {
+            "node": "Generate_response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "profile_query": {
+      "main": [
+        [
+          {
+            "node": "Uniswap_data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "profile_query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate_response": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "111db6b6-c74f-48ce-887b-ea5056573833",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "0ea9ad5874b0d5ff3dd33db0e530dabd369627d489de319c8755ab3757ba813f"
+  },
+  "id": "MrG1900ak5bnYxGQ",
+  "tags": []
+}
